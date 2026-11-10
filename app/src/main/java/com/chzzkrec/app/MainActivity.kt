@@ -74,7 +74,7 @@ class MainActivity : Activity() {
         if (i?.action != Intent.ACTION_SEND) return
         val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
         i.action = null
-        val id = ChzzkApi.parseChannelId(text)
+        val id = Sites.parse(text)
         if (id != null) addChannel(id, null) else toast("공유한 내용에서 채널 주소를 찾지 못했습니다")
     }
 
@@ -82,7 +82,6 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         lastPoll = 0
-        loginBtn.text = if (Store.cookies(this) != null) "네이버 로그아웃" else "네이버 로그인 (성인 방송용)"
         val pm = getSystemService(PowerManager::class.java)
         batteryBtn.visibility = if (pm.isIgnoringBatteryOptimizations(packageName)) View.GONE else View.VISIBLE
         ui.post(tick)
@@ -100,7 +99,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
         root.addView(TextView(this).apply {
-            text = "치지직 녹화"
+            text = "치지직 · 숲 녹화"
             textSize = 22f
             setTypeface(typeface, Typeface.BOLD)
             setPadding(0, dp(4), 0, dp(10))
@@ -118,7 +117,7 @@ class MainActivity : Activity() {
         root.addView(addRow)
 
         empty = TextView(this).apply {
-            text = "녹화할 채널을 추가하세요.\n치지직 앱의 공유 버튼에서 이 앱을 골라도 추가됩니다."
+            text = "녹화할 채널을 추가하세요. (치지직 · 숲)\n치지직·숲 앱의 공유 버튼에서 이 앱을 골라도 추가됩니다."
             setPadding(0, dp(24), 0, dp(24))
             gravity = Gravity.CENTER
         }
@@ -146,7 +145,7 @@ class MainActivity : Activity() {
             }
         }
         root.addView(batteryBtn)
-        loginBtn = Button(this).apply { setOnClickListener { onLogin() } }
+        loginBtn = Button(this).apply { text = "로그인 관리 (성인 방송용)"; setOnClickListener { onLogin() } }
         root.addView(loginBtn)
 
         val frame = FrameLayout(this).apply { fitsSystemWindows = true; addView(root) }
@@ -154,24 +153,44 @@ class MainActivity : Activity() {
     }
 
     private fun onLogin() {
-        if (Store.cookies(this) != null) {
-            Store.setCookies(this, null)
-            CookieManager.getInstance().removeAllCookies(null)
-            loginBtn.text = "네이버 로그인 (성인 방송용)"
-            toast("로그아웃했습니다")
-        } else {
-            startActivity(Intent(this, LoginActivity::class.java))
-        }
+        val naver = Store.cookies(this) != null
+        val soop = Store.soopCookies(this) != null
+        val items = arrayOf(
+            if (naver) "네이버(치지직): 로그인됨 — 눌러서 로그아웃" else "네이버(치지직) 로그인",
+            if (soop) "숲: 로그인됨 — 눌러서 로그아웃" else "숲 로그인",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("로그인 관리")
+            .setItems(items) { _, w ->
+                val on = if (w == 0) naver else soop
+                if (on) {
+                    if (w == 0) Store.setCookies(this, null) else Store.setSoopCookies(this, null)
+                    toast("로그아웃했습니다")
+                } else {
+                    // 이전 로그인 흔적이 남아 있으면 바로 닫히므로 새로 시작
+                    CookieManager.getInstance().removeAllCookies(null)
+                    startActivity(Intent(this, LoginActivity::class.java).putExtra("site", if (w == 0) "naver" else "soop"))
+                }
+            }
+            .setNegativeButton("닫기", null)
+            .show()
     }
 
     private fun onAdd() {
         val text = input.text.toString().trim()
         if (text.isEmpty()) return
-        val id = ChzzkApi.parseChannelId(text)
+        val id = Sites.parse(text)
         if (id != null) { input.setText(""); addChannel(id, null); return }
         toast("검색 중…")
         bg.execute {
-            val found = try { ChzzkApi.search(text) } catch (e: Exception) { null }
+            // 치지직과 숲을 함께 검색
+            var failed = 0
+            val all = ArrayList<Pair<String, String>>()
+            try { ChzzkApi.search(text).forEach { all.add(it.first to "[치지직] ${it.second}") } } catch (e: Exception) { failed++ }
+            try {
+                SoopApi.search(text).forEach { all.add(Sites.SOOP + it.first to "[숲] ${it.second} (${it.first})") }
+            } catch (e: Exception) { failed++ }
+            val found: List<Pair<String, String>>? = if (failed == 2) null else all
             ui.post {
                 if (isFinishing) return@post
                 when {
@@ -181,7 +200,7 @@ class MainActivity : Activity() {
                         .setTitle("채널 선택")
                         .setItems(found.map { it.second }.toTypedArray()) { _, w ->
                             input.setText("")
-                            addChannel(found[w].first, found[w].second)
+                            addChannel(found[w].first, found[w].second.substringAfter("] ").substringBefore(" ("))
                         }
                         .setNegativeButton("취소", null)
                         .show()
@@ -193,10 +212,10 @@ class MainActivity : Activity() {
     private fun addChannel(id: String, knownName: String?) {
         if (Store.channels(this).any { it.id == id }) { toast("이미 추가된 채널입니다"); return }
         bg.execute {
-            val info = try { ChzzkApi.liveDetail(id, Store.cookies(this)) } catch (_: Exception) { null }
+            val info = try { Sites.liveDetail(this, id) } catch (_: Exception) { null }
             if (info != null) RecorderService.live[id] = info
             val name = knownName ?: info?.channelName?.takeIf { it.isNotEmpty() }
-                ?: ChzzkApi.channelName(id) ?: id.take(8)
+                ?: Sites.name(id) ?: Sites.rawId(id).take(12)
             val all = Store.channels(this)
             if (all.none { it.id == id }) { all.add(Channel(id, name, false)); Store.save(this, all) }
             ui.post { toast("추가됨: $name"); render() }
@@ -211,7 +230,7 @@ class MainActivity : Activity() {
             for (c in chans) {
                 if (RecorderService.jobs.containsKey(c.id)) continue
                 try {
-                    val info = ChzzkApi.liveDetail(c.id, Store.cookies(this)) ?: continue
+                    val info = Sites.liveDetail(this, c.id) ?: continue
                     RecorderService.live[c.id] = info
                     if (info.channelName.isNotEmpty() && info.channelName != c.name) {
                         Store.update(this, c.id) { it.name = info.channelName }
@@ -234,7 +253,7 @@ class MainActivity : Activity() {
             val r = rows[c.id] ?: continue
             val job = RecorderService.jobs[c.id]
             val info = RecorderService.live[c.id]
-            r.name.text = c.name
+            r.name.text = Sites.tag(c.id) + c.name
             val sb = StringBuilder()
             if (job != null) {
                 if (job.bytes > 0) {
@@ -244,7 +263,7 @@ class MainActivity : Activity() {
                     sb.append(" · ").append(size(job.bytes))
                 } else sb.append(job.status)
             } else if (info == null) sb.append("확인 중…")
-            else if (info.open) sb.append("LIVE · ").append(info.title).append(if (info.adult) " (성인)" else "")
+            else if (info.open) sb.append("LIVE · ").append(info.title).append(if (info.adult) " (로그인 필요)" else "")
             else sb.append("오프라인")
             RecorderService.errors[c.id]?.let { sb.append("\n⚠ ").append(it) }
             RecorderService.saved[c.id]?.let { sb.append("\n저장 완료: ").append(it) }

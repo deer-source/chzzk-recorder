@@ -54,8 +54,42 @@ class RecordJob(
         }
     }
 
+    private val soop = Sites.isSoop(channelId)
+    private val referer = Sites.referer(channelId)
+    private var aid: String? = null
+
+    private fun setBaseName(channel: String, title: String) {
+        if (partNo != 0) return
+        val ts = SimpleDateFormat("yyMMdd_HHmmss", Locale.US).format(Date())
+        baseName = clean("${channel}_${ts}_${title}").take(80)
+    }
+
     /** API에서 방송 주소를 받아 최고 화질 재생목록 주소를 돌려준다. 방송이 끝났으면 null */
-    private fun resolveVariant(): String? {
+    private fun resolveVariant(): String? = if (soop) resolveSoop() else resolveChzzk()
+
+    private fun resolveSoop(): String? {
+        val bid = Sites.rawId(channelId)
+        val cookies = Store.soopCookies(ctx)
+        val lv = SoopApi.live(bid, cookies)
+        if (!lv.info.open) return null
+        if (lv.loginRequired) throw java.io.IOException("로그인이 필요한 방송 — 숲 로그인을 해주세요")
+        liveId = lv.info.liveId
+        val st = SoopApi.stream(bid, lv, cookies) ?: throw java.io.IOException(
+            if (lv.passwordLocked) "비밀번호가 걸린 방송은 녹화할 수 없습니다" else "방송 주소를 받지 못했습니다"
+        )
+        aid = st.aid
+        quality = st.quality
+        setBaseName(lv.info.channelName.ifEmpty { bid }, lv.info.title)
+        return withAid(st.url)
+    }
+
+    private fun withAid(url: String): String {
+        val a = aid ?: return url
+        if (url.contains("aid=")) return url
+        return url + (if (url.contains('?')) "&" else "?") + "aid=" + a
+    }
+
+    private fun resolveChzzk(): String? {
         val info = ChzzkApi.liveDetail(channelId, Store.cookies(ctx)) ?: return null
         if (!info.open) return null
         liveId = info.liveId
@@ -63,10 +97,7 @@ class RecordJob(
             if (info.adult) "성인 방송 — 네이버 로그인이 필요합니다" else "방송 주소를 받지 못했습니다"
         )
         hdnts = Regex("[?&]hdnts=([^&]+)").find(master)?.groupValues?.get(1)
-        if (partNo == 0) {
-            val ts = SimpleDateFormat("yyMMdd_HHmmss", Locale.US).format(Date())
-            baseName = clean("${info.channelName}_${ts}_${info.title}").take(80)
-        }
+        setBaseName(info.channelName, info.title)
         val variants = Hls.parseMaster(Net.getText(master), master)
         val best = Hls.best(variants) ?: return master // 화질 목록이 없으면 그 자체가 재생목록
         quality = if (best.height > 0) "${best.height}p" else "${best.bandwidth / 1000}kbps"
@@ -82,7 +113,7 @@ class RecordJob(
 
         while (!stopRequested) {
             val pl = try {
-                Hls.parseMedia(Net.getText(variant), variant).also { fails = 0 }
+                Hls.parseMedia(Net.getText(variant, null, referer), variant).also { fails = 0 }
             } catch (e: InterruptedException) {
                 throw e
             } catch (e: Exception) {
@@ -98,11 +129,14 @@ class RecordJob(
                 continue
             }
 
+            // 서버가 재연결되어 조각 번호가 처음부터 다시 매겨진 경우
+            if (pl.segs.isNotEmpty() && pl.segs.last().seq < lastSeq - 5) lastSeq = -1
             var fresh = pl.segs.filter { it.seq > lastSeq }
             if (lastSeq < 0) fresh = fresh.takeLast(4) // 처음엔 최신 구간부터
+            if (soop) fresh = fresh.filter { !it.url.contains("preloading") } // 숲의 대기 화면 조각 제외
             for (seg in fresh) {
                 if (stopRequested) break
-                val data = fetchSegment(seg.url)
+                val data = fetchSegment(withAid(seg.url))
                 if (data != null) {
                     ensurePart(seg.mapUrl)
                     out!!.write(data)
@@ -134,7 +168,7 @@ class RecordJob(
         for (attempt in 1..4) {
             if (stopRequested) return null
             try {
-                return Net.getBytes(u)
+                return Net.getBytes(u, null, referer)
             } catch (e: InterruptedException) {
                 throw e
             } catch (e: Net.HttpError) {
@@ -159,11 +193,11 @@ class RecordJob(
             try {
                 var data: ByteArray
                 try {
-                    data = Net.getBytes(url)
+                    data = Net.getBytes(url, null, referer)
                 } catch (e: Net.HttpError) {
                     val t = hdnts
                     if (e.code == 403 && t != null)
-                        data = Net.getBytes(url + (if (url.contains('?')) "&" else "?") + "__bgda__=" + t)
+                        data = Net.getBytes(url + (if (url.contains('?')) "&" else "?") + "__bgda__=" + t, null, referer)
                     else throw e
                 }
                 mapCache[url] = data

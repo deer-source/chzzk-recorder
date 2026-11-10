@@ -158,7 +158,7 @@ class RecorderService : Service() {
                     if (!alive) break
                     if (jobs.containsKey(ch.id)) continue
                     try {
-                        val info = ChzzkApi.liveDetail(ch.id, Store.cookies(this)) ?: continue
+                        val info = Sites.liveDetail(this, ch.id) ?: continue
                         live[ch.id] = info
                         if (info.open && skipLive[ch.id] != info.liveId) {
                             main.post { if (alive) startJob(ch.id) }

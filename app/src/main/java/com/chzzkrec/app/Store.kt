@@ -41,4 +41,10 @@ object Store {
     fun setCookies(ctx: Context, v: String?) {
         prefs(ctx).edit().putString("cookies", v ?: "").apply()
     }
+
+    fun soopCookies(ctx: Context): String? = prefs(ctx).getString("soop_cookies", null)?.takeIf { it.isNotEmpty() }
+
+    fun setSoopCookies(ctx: Context, v: String?) {
+        prefs(ctx).edit().putString("soop_cookies", v ?: "").apply()
+    }
 }
