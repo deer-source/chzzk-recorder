@@ -1,6 +1,8 @@
 package com.chzzkrec.app
 
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -13,13 +15,13 @@ object Net {
 
     class HttpError(val code: Int) : IOException("HTTP $code")
 
-    private fun open(url: String, cookies: String?, referer: String): HttpURLConnection {
+    private fun open(url: String, cookies: String?, referer: String, accept: String = "*/*"): HttpURLConnection {
         val c = URL(url).openConnection() as HttpURLConnection
         c.connectTimeout = 10_000
         c.readTimeout = 20_000
         c.instanceFollowRedirects = true
         c.setRequestProperty("User-Agent", UA)
-        c.setRequestProperty("Accept", "*/*")
+        c.setRequestProperty("Accept", accept)
         c.setRequestProperty("Referer", referer)
         val u = URL(referer)
         c.setRequestProperty("Origin", "${u.protocol}://${u.host}")
@@ -27,8 +29,8 @@ object Net {
         return c
     }
 
-    fun getBytes(url: String, cookies: String? = null, referer: String = CHZZK): ByteArray {
-        val c = open(url, cookies, referer)
+    fun getBytes(url: String, cookies: String? = null, referer: String = CHZZK, accept: String = "*/*"): ByteArray {
+        val c = open(url, cookies, referer, accept)
         try {
             val code = c.responseCode
             if (code !in 200..299) throw HttpError(code)
@@ -41,8 +43,8 @@ object Net {
         }
     }
 
-    fun getText(url: String, cookies: String? = null, referer: String = CHZZK): String =
-        String(getBytes(url, cookies, referer), Charsets.UTF_8)
+    fun getText(url: String, cookies: String? = null, referer: String = CHZZK, accept: String = "*/*"): String =
+        String(getBytes(url, cookies, referer, accept), Charsets.UTF_8)
 
     /** API는 400/404에도 JSON 본문을 주므로 오류 본문까지 읽는다 */
     fun getTextAnyStatus(url: String, cookies: String? = null, referer: String = CHZZK): String {
@@ -68,6 +70,57 @@ object Net {
             return c.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
         } finally {
             c.disconnect()
+        }
+    }
+
+    /** 큰 파일 내려받기. 끊기면 받은 곳부터 이어받는다 */
+    fun download(url: String, file: File, referer: String, stop: () -> Boolean, progress: (Long, Long) -> Unit) {
+        var fails = 0
+        var total = -1L
+        val buf = ByteArray(256 * 1024)
+        while (true) {
+            if (stop()) throw InterruptedException()
+            val have = if (file.exists()) file.length() else 0L
+            if (total > 0 && have >= total) return
+            val c = open(url, null, referer)
+            try {
+                if (have > 0) c.setRequestProperty("Range", "bytes=$have-")
+                val code = c.responseCode
+                if (code == 416 && have > 0) return
+                if (code !in 200..299) throw HttpError(code)
+                val append = code == 206
+                val len = c.contentLengthLong
+                total = if (len >= 0) (if (append) have + len else len) else -1L
+                var done = if (append) have else 0L
+                FileOutputStream(file, append).use { out ->
+                    c.inputStream.use { inp ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            fails = 0
+                            progress(done, total)
+                            if (stop()) throw InterruptedException()
+                        }
+                    }
+                }
+                if (total < 0 || done >= total) return
+            } catch (e: InterruptedException) {
+                throw e
+            } catch (e: HttpError) {
+                // 주소 만료·권한 오류는 다시 해도 같으므로 바로 실패
+                if (e.code in 400..499 && e.code != 408 && e.code != 429) throw e
+                fails++
+                if (fails > 8) throw e
+                Thread.sleep(1500L * fails)
+            } catch (e: Exception) {
+                fails++
+                if (fails > 8) throw e
+                Thread.sleep(1500L * fails)
+            } finally {
+                c.disconnect()
+            }
         }
     }
 }

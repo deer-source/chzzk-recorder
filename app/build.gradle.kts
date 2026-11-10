@@ -11,8 +11,8 @@ android {
         applicationId = "com.chzzkrec.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // 빌드할 때마다 같은 서명을 쓰도록 고정 키 사용 (업데이트 설치 가능)

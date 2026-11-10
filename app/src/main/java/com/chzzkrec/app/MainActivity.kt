@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val bg = Executors.newFixedThreadPool(2)
     private lateinit var list: LinearLayout
+    private lateinit var dlList: LinearLayout
+    private val dlRows = ArrayList<Triple<DownloadJob, TextView, Button>>()
     private lateinit var input: EditText
     private lateinit var loginBtn: Button
     private lateinit var batteryBtn: Button
@@ -74,8 +76,9 @@ class MainActivity : Activity() {
         if (i?.action != Intent.ACTION_SEND) return
         val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
         i.action = null
+        if (startDownload(text)) return
         val id = Sites.parse(text)
-        if (id != null) addChannel(id, null) else toast("공유한 내용에서 채널 주소를 찾지 못했습니다")
+        if (id != null) addChannel(id, null) else toast("공유한 내용에서 주소를 찾지 못했습니다")
     }
 
     override fun onResume() {
@@ -107,7 +110,7 @@ class MainActivity : Activity() {
 
         val addRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         input = EditText(this).apply {
-            hint = "채널명 검색 또는 채널 주소 붙여넣기"
+            hint = "채널명 검색 · 채널/클립/캐치/다시보기 주소"
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_DONE
             setOnEditorActionListener { _, _, _ -> onAdd(); true }
@@ -117,12 +120,13 @@ class MainActivity : Activity() {
         root.addView(addRow)
 
         empty = TextView(this).apply {
-            text = "녹화할 채널을 추가하세요. (치지직 · 숲)\n치지직·숲 앱의 공유 버튼에서 이 앱을 골라도 추가됩니다."
+            text = "녹화할 채널을 추가하세요. (치지직 · 숲)\n클립·캐치·다시보기는 주소를 붙여넣으면 바로 내려받습니다.\n치지직·숲 앱의 공유 버튼에서 이 앱을 골라도 됩니다."
             setPadding(0, dp(24), 0, dp(24))
             gravity = Gravity.CENTER
         }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(empty); addView(list) }
+        dlList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(dlList); addView(empty); addView(list) }
         val scroll = ScrollView(this).apply { addView(inner) }
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -176,9 +180,49 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** 클립·캐치·다시보기 주소면 내려받기를 시작한다 */
+    private fun startDownload(text: String): Boolean {
+        if (MediaApi.parse(text) == null) return false
+        RecorderService.download(this, text)
+        toast("내려받기를 시작합니다")
+        return true
+    }
+
+    private fun renderDownloads() {
+        val jobs = RecorderService.downloads.toList()
+        if (jobs != dlRows.map { it.first }) {
+            dlList.removeAllViews()
+            dlRows.clear()
+            for (j in jobs) {
+                val box = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(8), 0, dp(4))
+                }
+                val tv = TextView(this).apply { textSize = 13f }
+                val btn = Button(this)
+                btn.setOnClickListener {
+                    if (j.finished) { RecorderService.downloads.remove(j); renderDownloads() }
+                    else RecorderService.send(this, RecorderService.ACT_CANCEL, j.key)
+                }
+                box.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                box.addView(btn)
+                dlList.addView(box)
+                dlRows.add(Triple(j, tv, btn))
+            }
+        }
+        for ((j, tv, btn) in dlRows) {
+            val sb = StringBuilder("⬇ ").append(j.title).append("\n").append(j.status)
+            j.error?.let { sb.append(" — ⚠ ").append(it) }
+            tv.text = sb
+            btn.text = if (j.finished) "지우기" else "취소"
+        }
+    }
+
     private fun onAdd() {
         val text = input.text.toString().trim()
         if (text.isEmpty()) return
+        if (startDownload(text)) { input.setText(""); return }
         val id = Sites.parse(text)
         if (id != null) { input.setText(""); addChannel(id, null); return }
         toast("검색 중…")
@@ -242,13 +286,14 @@ class MainActivity : Activity() {
     }
 
     private fun render() {
+        renderDownloads()
         val chans = Store.channels(this)
         if (chans.map { it.id } != rows.keys.toList()) {
             list.removeAllViews()
             rows.clear()
             for (c in chans) { val r = makeRow(c); rows[c.id] = r; list.addView(r.root) }
         }
-        empty.visibility = if (chans.isEmpty()) View.VISIBLE else View.GONE
+        empty.visibility = if (chans.isEmpty() && dlRows.isEmpty()) View.VISIBLE else View.GONE
         for (c in chans) {
             val r = rows[c.id] ?: continue
             val job = RecorderService.jobs[c.id]

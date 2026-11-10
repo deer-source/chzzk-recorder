@@ -58,6 +58,22 @@ object Finalizer {
         return name
     }
 
+    /** 이미 완성된 파일을 그대로 Movies/Chzzk로 옮긴다 */
+    fun publish(ctx: Context, src: File, name: String, mime: String) {
+        val uri = insert(ctx, name, mime)
+        try {
+            ctx.contentResolver.openOutputStream(uri)!!.use { out ->
+                src.inputStream().use { it.copyTo(out, 1 shl 20) }
+            }
+        } catch (e: Exception) {
+            try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            throw e
+        }
+        val done = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+        ctx.contentResolver.update(uri, done, null, null)
+        src.delete()
+    }
+
     private fun insert(ctx: Context, name: String, mime: String): Uri {
         val v = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)

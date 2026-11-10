@@ -6,7 +6,7 @@ import java.net.URL
 object Hls {
     data class Variant(val url: String, val height: Int, val bandwidth: Long)
     data class Seg(val seq: Long, val url: String, val mapUrl: String?)
-    data class Media(val segs: List<Seg>, val ended: Boolean, val targetSec: Double)
+    data class Media(val segs: List<Seg>, val ended: Boolean, val targetSec: Double, val encrypted: Boolean = false)
 
     fun resolve(base: String, ref: String): String =
         try { URL(URL(base), ref).toString() } catch (e: Exception) { ref }
@@ -46,6 +46,7 @@ object Hls {
         var map: String? = null
         var ended = false
         var target = 2.0
+        var encrypted = false
         for (raw in text.lines()) {
             val l = raw.trim()
             if (l.isEmpty()) continue
@@ -56,11 +57,12 @@ object Hls {
                     target = l.substringAfter(':').trim().toDoubleOrNull() ?: 2.0
                 l.startsWith("#EXT-X-MAP:") ->
                     map = attr(l, "URI")?.let { resolve(base, it) }
+                l.startsWith("#EXT-X-KEY:") -> if ((attr(l, "METHOD") ?: "NONE") != "NONE") encrypted = true
                 l.startsWith("#EXT-X-ENDLIST") -> ended = true
                 l.startsWith("#") -> {}
                 else -> { segs.add(Seg(seq, resolve(base, l), map)); seq++ }
             }
         }
-        return Media(segs, ended, target)
+        return Media(segs, ended, target, encrypted)
     }
 }

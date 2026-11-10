@@ -27,6 +27,9 @@ class RecorderService : Service() {
         const val ACT_STOP = "stop"
         const val ACT_STOP_ALL = "stop_all"
         const val ACT_SYNC = "sync"
+        const val ACT_DOWNLOAD = "download"
+        const val ACT_CANCEL = "cancel"
+        const val EXTRA_TEXT = "text"
         const val EXTRA_ID = "id"
         private const val NOTIF_ID = 1
         private const val CH = "rec"
@@ -38,6 +41,14 @@ class RecorderService : Service() {
         val finalizing = AtomicInteger(0)
         /** 사용자가 직접 멈춘 방송은 같은 방송 동안 자동으로 다시 녹화하지 않는다 */
         val skipLive = ConcurrentHashMap<String, Long>()
+        /** 클립·캐치·다시보기 내려받기 목록 (끝난 것도 화면 표시용으로 남김) */
+        val downloads = java.util.concurrent.CopyOnWriteArrayList<DownloadJob>()
+
+        fun download(ctx: Context, text: String) {
+            ctx.startForegroundService(
+                Intent(ctx, RecorderService::class.java).setAction(ACT_DOWNLOAD).putExtra(EXTRA_TEXT, text)
+            )
+        }
 
         fun send(ctx: Context, action: String, id: String? = null) {
             val i = Intent(ctx, RecorderService::class.java).setAction(action)
@@ -76,9 +87,10 @@ class RecorderService : Service() {
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "chzzkrec:wifi").apply { setReferenceCounted(false) }
 
         // 지난번에 앱이 강제 종료되어 남은 원본이 있으면 마저 저장
-        if (jobs.isEmpty() && finalizing.get() == 0) {
-            Finalizer.rawDir(this).listFiles()?.filter { it.name.contains(".raw.") }?.forEach {
-                enqueueFinalize("", it)
+        if (jobs.isEmpty() && finalizing.get() == 0 && downloads.none { !it.finished }) {
+            Finalizer.rawDir(this).listFiles()?.forEach {
+                if (it.name.contains(".raw.")) enqueueFinalize("", it)
+                else if (it.name.contains(".dl.")) it.delete() // 받다 만 파일
             }
         }
 
@@ -96,6 +108,8 @@ class RecorderService : Service() {
             ACT_START -> if (id != null) { skipLive.remove(id); startJob(id) }
             ACT_STOP -> if (id != null) jobs[id]?.requestStop(true)
             ACT_STOP_ALL -> jobs.values.forEach { it.requestStop(true) }
+            ACT_DOWNLOAD -> intent.getStringExtra(EXTRA_TEXT)?.let { startDownload(it) }
+            ACT_CANCEL -> downloads.firstOrNull { it.key == id && !it.finished }?.cancel()
         }
         monitor?.interrupt() // 설정이 바뀌었으니 바로 한 번 확인
         main.postDelayed({ checkIdle() }, 1500)
@@ -132,6 +146,16 @@ class RecorderService : Service() {
         jobs[id] = job
         job.start()
         notifyNow()
+    }
+
+    private fun startDownload(text: String) {
+        val ref = MediaApi.parse(text) ?: return
+        val key = "${ref.kind}:${ref.id}"
+        if (downloads.any { it.key == key && !it.finished }) return
+        downloads.removeAll { it.key == key }
+        val job = DownloadJob(applicationContext, ref) { main.post { notifyNow(); checkIdle() } }
+        downloads.add(0, job)
+        job.start()
     }
 
     private fun enqueueFinalize(id: String, f: File) {
@@ -176,7 +200,7 @@ class RecorderService : Service() {
 
     private fun checkIdle() {
         if (!alive) return
-        if (jobs.isEmpty() && finalizing.get() == 0 && autoCount() == 0) {
+        if (jobs.isEmpty() && finalizing.get() == 0 && autoCount() == 0 && downloads.none { !it.finished }) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -187,6 +211,8 @@ class RecorderService : Service() {
         val auto = autoCount()
         val text = buildString {
             if (rec > 0) append("녹화 중 ${rec}개")
+            val dl = downloads.count { !it.finished }
+            if (dl > 0) { if (isNotEmpty()) append(" · "); append("내려받는 중 ${dl}개") }
             if (finalizing.get() > 0) { if (isNotEmpty()) append(" · "); append("저장 중") }
             if (auto > 0) { if (isNotEmpty()) append(" · "); append("자동 녹화 대기 ${auto}개") }
             if (isEmpty()) append("대기 중")
@@ -225,6 +251,7 @@ class RecorderService : Service() {
         main.removeCallbacksAndMessages(null)
         monitor?.interrupt()
         jobs.values.forEach { it.requestStop(false) }
+        downloads.forEach { if (!it.finished) it.cancel() }
         finalizer.shutdown()
         try { wake?.release() } catch (_: Exception) {}
         try { wifi?.release() } catch (_: Exception) {}
